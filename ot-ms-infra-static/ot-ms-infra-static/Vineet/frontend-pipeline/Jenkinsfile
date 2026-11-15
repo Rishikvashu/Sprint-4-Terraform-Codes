@@ -1,0 +1,83 @@
+// Deploys Frontend Infra (dev) in the CENTRAL AWS account. Stacks run in dependency order.
+def STACKS = [
+    [name: 'security-group', dir: 'Palak/frontend-security-group'],
+    [name: 'instance', dir: 'Maqbool/frontend-instance'],
+    [name: 'launch-template', dir: 'Priyanshu/frontend-launch-template'],
+    [name: 'target-group', dir: 'Rani/frontend-target-group'],
+    [name: 'auto-scaling-group', dir: 'Sarthak/frontend-auto-scaling-group'],
+    [name: 'auto-scaling-policies', dir: 'Shivam/frontend-auto-scaling-policies'],
+    [name: 'listener-rule', dir: 'Vashishtha/frontend-listener-rule']
+]
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
+    parameters {
+        choice(name: 'ACTION', choices: ['plan', 'apply', 'destroy'], description: 'Terraform action')
+        booleanParam(name: 'AUTO_APPROVE', defaultValue: false, description: 'Skip manual approval')
+    }
+
+    environment {
+        AWS_DEFAULT_REGION = 'ap-south-1'
+        TF_IN_AUTOMATION   = 'true'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps { checkout scm }
+        }
+
+        stage('Validate') {
+            steps {
+                script {
+                    STACKS.each { s ->
+                        dir(s.dir) {
+                            sh 'terraform init -backend=false -input=false'
+                            sh 'terraform fmt -check'
+                            sh 'terraform validate'
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Terraform') {
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-central-account']]) {
+                    script {
+                        def ordered = (params.ACTION == 'destroy') ? STACKS.reverse() : STACKS
+                        ordered.each { s ->
+                            stage("${params.ACTION}: ${s.name}") {
+                                dir(s.dir) {
+                                    sh 'terraform init -input=false'
+                                    if (params.ACTION == 'destroy') {
+                                        sh 'terraform plan -destroy -out=tfplan'
+                                    } else {
+                                        sh 'terraform plan -out=tfplan'
+                                    }
+                                    if (params.ACTION != 'plan') {
+                                        if (!params.AUTO_APPROVE) {
+                                            input message: "${params.ACTION} ${s.name}?", ok: 'Proceed'
+                                        }
+                                        sh 'terraform apply -auto-approve tfplan'
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always  { cleanWs() }
+        success { echo 'Frontend Infra: ${params.ACTION} OK' }
+        failure { echo 'Frontend Infra: ${params.ACTION} FAILED' }
+    }
+}

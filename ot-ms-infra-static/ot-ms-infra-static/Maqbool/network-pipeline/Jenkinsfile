@@ -1,0 +1,85 @@
+// Deploys Network Skeleton (dev) in the CENTRAL AWS account. Stacks run in dependency order.
+def STACKS = [
+    [name: 'vpc', dir: 'Palak/network-vpc'],
+    [name: 'igw', dir: 'Sarthak/network-igw'],
+    [name: 'subnets', dir: 'Priyanshu/network-subnets'],
+    [name: 'nat-gateway', dir: 'Rani/network-nat-gateway'],
+    [name: 'route-tables', dir: 'Shivam/network-route-tables'],
+    [name: 'nacl', dir: 'Vashishtha/network-nacl'],
+    [name: 'ssh-key', dir: 'Anshul/network-ssh-key'],
+    [name: 'load-balancer', dir: 'Vineet/network-load-balancer'],
+    [name: 'route53', dir: 'Anurag/network-route53']
+]
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
+    parameters {
+        choice(name: 'ACTION', choices: ['plan', 'apply', 'destroy'], description: 'Terraform action')
+        booleanParam(name: 'AUTO_APPROVE', defaultValue: false, description: 'Skip manual approval')
+    }
+
+    environment {
+        AWS_DEFAULT_REGION = 'ap-south-1'
+        TF_IN_AUTOMATION   = 'true'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps { checkout scm }
+        }
+
+        stage('Validate') {
+            steps {
+                script {
+                    STACKS.each { s ->
+                        dir(s.dir) {
+                            sh 'terraform init -backend=false -input=false'
+                            sh 'terraform fmt -check'
+                            sh 'terraform validate'
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Terraform') {
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-central-account']]) {
+                    script {
+                        def ordered = (params.ACTION == 'destroy') ? STACKS.reverse() : STACKS
+                        ordered.each { s ->
+                            stage("${params.ACTION}: ${s.name}") {
+                                dir(s.dir) {
+                                    sh 'terraform init -input=false'
+                                    if (params.ACTION == 'destroy') {
+                                        sh 'terraform plan -destroy -out=tfplan'
+                                    } else {
+                                        sh 'terraform plan -out=tfplan'
+                                    }
+                                    if (params.ACTION != 'plan') {
+                                        if (!params.AUTO_APPROVE) {
+                                            input message: "${params.ACTION} ${s.name}?", ok: 'Proceed'
+                                        }
+                                        sh 'terraform apply -auto-approve tfplan'
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always  { cleanWs() }
+        success { echo 'Network Skeleton: ${params.ACTION} OK' }
+        failure { echo 'Network Skeleton: ${params.ACTION} FAILED' }
+    }
+}
